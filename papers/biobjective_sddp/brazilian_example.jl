@@ -8,6 +8,7 @@ using .BiObjectiveSDDP
 
 using SDDP
 import Gurobi
+import Statistics
 
 const OBJ_1_SCALING = 0.01
 const OBJ_2_SCALING = 0.1
@@ -130,6 +131,14 @@ function _save_simulations_to_dat(simulations, simulation_weights)
             println(io, join(A[i, :], "  "))
         end
     end
+    open("new_data.dat", "w") do io
+        for (i, w) in enumerate([0.1, 0.7, 0.9])
+            s = w .* A[:, 2i-1] + (1 - w) .* A[:, 2i]
+            μ = Statistics.mean(s)
+            Q = Statistics.quantile(s, [0.1, 0.9])
+            println(io, w, " ", μ, " ", μ - Q[1], " ", Q[2] - μ)
+        end
+    end
     return
 end
 
@@ -178,7 +187,7 @@ function experiment_2(N::Int)
     solutions = SDDP.train_biobjective(
         model;
         solution_limit = N,
-        timing = true,
+        include_timing = true,
         print_level = 0,
         stopping_rules = [SDDP.BoundStalling(10, 1e3)],
     )
