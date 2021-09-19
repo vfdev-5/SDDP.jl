@@ -67,6 +67,7 @@ end
     train_biobjective(
         model::SDDP.PolicyGraph;
         solution_limit::Int,
+        include_timing::Bool = false,
         kwargs...,
     )
 
@@ -84,20 +85,29 @@ method.
 Returns a dictionary mapping trade-off weights to their scalarized objective
 value.
 
+If `include_timing`, returns a dictionary mapping trade-off weights to a tuple
+of the scalarized objective value and the solution time to date.
+
 !!! warning
     This function is experimental! It may change in any future release.
 """
 function train_biobjective(
     model::SDDP.PolicyGraph;
     solution_limit::Int,
+    include_timing::Bool = false,
     kwargs...,
 )
     start_time = time()
-    solutions = Dict{Float64,Tuple{Float64,Float64}}()
+    solutions = if timing
+        Dict{Float64,Tuple{Float64,Float64}}()
+    else
+        Dict{Float64,Float64}()
+    end
+    value(bound) = timing ? (bound, time() - start_time) : bound
     for weight in (0.0, 1.0)
         set_trade_off_weight(model, weight)
         SDDP.train(model; add_to_existing_cuts = true, kwargs...)
-        solutions[weight] = (SDDP.calculate_bound(model), time() - start_time)
+        solutions[weight] = value(SDDP.calculate_bound(model))
     end
     queue = Tuple{Float64,Float64}[(0.0, 1.0)]
     while length(queue) > 0 && length(solutions) < solution_limit
@@ -106,7 +116,7 @@ function train_biobjective(
         set_trade_off_weight(model, w)
         SDDP.train(model; add_to_existing_cuts = true, kwargs...)
         bound = SDDP.calculate_bound(model)
-        solutions[w] = (bound, time() - start_time)
+        solutions[w] = value(bound)
         best_bound = 0.5 * (solutions[a][1] + solutions[b][1])
         if !isapprox(best_bound, bound; rtol = 1e-4)
             push!(queue, (a, w))

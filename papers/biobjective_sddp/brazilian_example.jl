@@ -178,6 +178,7 @@ function experiment_2(N::Int)
     solutions = SDDP.train_biobjective(
         model;
         solution_limit = N,
+        timing = true,
         print_level = 0,
         stopping_rules = [SDDP.BoundStalling(10, 1e3)],
     )
