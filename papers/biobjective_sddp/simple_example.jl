@@ -41,46 +41,54 @@ function create_model()
     return model
 end
 
-Random.seed!(1)
+function my_optimizer()
+    model = Gurobi.Optimizer(GUROBI_ENV)
+    MOI.set(model, MOI.Silent(), true)
+    return model
+end
 
-bounds_for_reporting = Tuple{Float64,Float64,Float64}[]
+function main(update_method, filename)
+    Random.seed!(1)
+    bounds_for_reporting = Tuple{Float64,Float64,Float64}[]
+    model = create_model()
+    _, _, _ = BiObjectiveSDDP.bi_objective_sddp(
+        model,
+        my_optimizer;
+        # BiObjectiveSDDP kwargs ...
+        bi_objective_sddp_iteration_limit = 20,
+        bi_objective_lower_bound = 0.0,
+        bi_objective_lambda_update_method = update_method,
+        bi_objective_lambda_atol = 1e-6,
+        bi_objective_major_iteration_burn_in = 1,
+        bi_objective_post_train_callback = (model::SDDP.PolicyGraph, λ) ->
+            begin
+                upper_bound = BiObjectiveSDDP.surrogate_upper_bound(
+                    model,
+                    my_optimizer;
+                    global_lower_bound = 0.0,
+                    lambda_minimum_step = 1e-4,
+                    lambda_atol = 1e-4,
+                )
+                lower_bound, _, _ = BiObjectiveSDDP.surrogate_lower_bound(
+                    model,
+                    my_optimizer;
+                    global_lower_bound = 0.0,
+                    lambda_minimum_step = 1e-4,
+                    lambda_atol = 1e-4,
+                )
+                push!(bounds_for_reporting, (λ, lower_bound, upper_bound))
+            end,
+        # SDDP.jl kwargs ...
+        iteration_limit = 1,
+        print_level = 0,
+    )
+    open(filename, "w") do io
+        for (i, b) in enumerate(bounds_for_reporting)
+            println(io, i, ", ", join(b, ", "))
+        end
+    end
+    return
+end
 
-model = create_model()
-lower_bound, weights, bounds = BiObjectiveSDDP.bi_objective_sddp(
-    model,
-    () -> Gurobi.Optimizer(GUROBI_ENV);
-    # BiObjectiveSDDP kwargs ...
-    bi_objective_sddp_iteration_limit = 20,
-    bi_objective_lower_bound = 0.0,
-    bi_objective_lambda_update_method = BiObjectiveSDDP.MinimumUpdate(),
-    bi_objective_lambda_atol = 1e-6,
-    bi_objective_major_iteration_burn_in = 1,
-    bi_objective_post_train_callback = (model::SDDP.PolicyGraph, λ) ->
-        begin
-            upper_bound = BiObjectiveSDDP.surrogate_upper_bound(
-                model,
-                () -> Gurobi.Optimizer(GUROBI_ENV);
-                global_lower_bound = 0.0,
-                lambda_minimum_step = 1e-4,
-                lambda_atol = 1e-4,
-            )
-            lower_bound, _, _ = BiObjectiveSDDP.surrogate_lower_bound(
-                model,
-                () -> Gurobi.Optimizer(GUROBI_ENV);
-                global_lower_bound = 0.0,
-                lambda_minimum_step = 1e-4,
-                lambda_atol = 1e-4,
-            )
-            push!(bounds_for_reporting, (λ, lower_bound, upper_bound))
-        end,
-    # SDDP.jl kwargs ...
-    iteration_limit = 1,
-    print_level = 0,
-)
-
-hcat(
-    1:length(bounds_for_reporting),
-    [b[1] for b in bounds_for_reporting],
-    [b[2] for b in bounds_for_reporting],
-    [b[3] for b in bounds_for_reporting],
-)
+main(BiObjectiveSDDP.MinimumUpdate(), "simple_example_min.dat")
+main(BiObjectiveSDDP.RandomUpdate(), "simple_example_rand.dat")
