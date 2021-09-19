@@ -8,13 +8,12 @@ using .BiObjectiveSDDP
 
 using SDDP
 import Gurobi
-import Plots
 
 const OBJ_1_SCALING = 0.01
 const OBJ_2_SCALING = 0.1
+include("brazilian_data.jl")
 
-function create_model()
-    include("brazilian_data.jl")
+function create_model(weight = nothing)
     env = Gurobi.Env()
     model = SDDP.LinearPolicyGraph(
         stages = 12,
@@ -77,17 +76,26 @@ function create_model()
                 )
             end
         )
-        SDDP.initialize_biobjective_subproblem(sp)
+        if weight === nothing
+            SDDP.initialize_biobjective_subproblem(sp)
+        end
         SDDP.parameterize(sp, Ω) do ω
             JuMP.fix.(inflow, ω)
-            SDDP.set_biobjective_functions(sp, objective_1, objective_2)
+            if weight === nothing
+                SDDP.set_biobjective_functions(sp, objective_1, objective_2)
+            else
+                @stageobjective(
+                    sp,
+                    weight * objective_1 + (1 - weight) * objective_2,
+                )
+            end
             return
         end
     end
     return model
 end
 
-function simulate_policy(model, keys)
+function _simulate_policy(model, keys)
     simulations = Dict()
     for λ in keys
         BiObjectiveSDDP.set_scalarizing_weight(model, λ)
@@ -100,90 +108,140 @@ function simulate_policy(model, keys)
     return simulations
 end
 
-function extract_objectives(simulation)
+function _extract_objectives(simulation)
     obj_1 = [sum(s[:objective_1] for s in sim) for sim in simulation]
     obj_2 = [sum(s[:objective_2] for s in sim) for sim in simulation]
     return obj_1, obj_2
 end
 
-function plot_objective_space(simulations, simulation_weights)
-    Plots.plot(title = "Objective Space")
-    for λ in simulation_weights
-        Plots.scatter!(
-            extract_objectives(simulations[λ])...,
-            label = "\\lambda = $(λ)",
-            alpha = 0.4,
-        )
-    end
-    p = Plots.plot!(xlabel = "Deficit cost", ylabel = "Thermal cost")
-    Plots.savefig("objective_space.pdf")
-    return p
-end
-
-function plot_weight_space(weights, bounds, simulations)
-    Plots.plot(weights, bounds, label = "")
-    for (λ, sim) in simulations
-        obj_1, obj_2 = extract_objectives(simulations[λ])
-        weighted_sum = λ .* obj_1 .+ (1 - λ) .* obj_2
-        Plots.scatter!(
-            fill(λ, length(weighted_sum)),
-            weighted_sum,
-            alpha = 0.4,
-            label = "",
-        )
-    end
-    p = Plots.plot!(xlabel = "Weight \\lambda", ylabel = "Weighted-sum")
-    Plots.savefig("weight_space.pdf")
-    return p
-end
-
-# import Logging
-# Logging.global_logger(Logging.ConsoleLogger(stdout, Logging.Debug))
-
-model = create_model()
-lower_bound, weights, bounds = BiObjectiveSDDP.bi_objective_sddp(
-    model,
-    () -> Gurobi.Optimizer(GUROBI_ENV);
-    # BiObjectiveSDDP kwargs ...
-    bi_objective_minor_iteration_limit = 60,
-    bi_objective_lambda_atol = 1e-3,
-    bi_objective_lower_bound = 0.0,
-    bi_objective_major_iteration_burn_in = 20,
-    # SDDP.jl kwargs ...
-    print_level = 0,
-    stopping_rules = [SDDP.BoundStalling(3, 1.0), SDDP.IterationLimit(50)],
-)
-simulation_weights = [0.1, 0.7, 0.9]
-simulations = simulate_policy(model, simulation_weights);
-plot_objective_space(simulations, simulation_weights)
-plot_weight_space(weights, bounds, simulations)
-
-function save_lower_bound_to_dat(weights, bounds)
-    open("bounds.dat", "w") do io
-        for (w, b) in zip(weights, bounds)
-            println(io, "$(w)  $(b)")
-        end
-    end
-end
-
-function save_simulations_to_dat(simulations, simulation_weights)
+function _save_simulations_to_dat(simulations, simulation_weights)
     A = Matrix{Float64}(
         undef,
         length(simulations[first(simulation_weights)]),
         2 * length(simulation_weights),
     )
     for (i, weight) in enumerate(simulation_weights)
-        obj_1, obj_2 = extract_objectives(simulations[weight])
+        obj_1, obj_2 = _extract_objectives(simulations[weight])
         A[:, 2*i-1] .= obj_1
         A[:, 2*i] .= obj_2
     end
     open("simulations.dat", "w") do io
         for i in 1:size(A, 1)
-            print(io, A[i, 1])
-            for j in 2:size(A, 2)
-                print(io, "  ", A[i, j])
-            end
-            println(io)
+            println(io, join(A[i, :], "  "))
         end
     end
+    return
+end
+
+"""
+    experiment_1()
+
+Run the first experiment where we train the policy using the true biobjective
+SDDP algorithm.
+"""
+function experiment_1()
+    model = create_model()
+    lower_bound, weights, bounds = BiObjectiveSDDP.bi_objective_sddp(
+        model,
+        () -> Gurobi.Optimizer(GUROBI_ENV);
+        # BiObjectiveSDDP kwargs ...
+        bi_objective_sddp_iteration_limit = 2000,
+        bi_objective_lambda_atol = 1e-3,
+        bi_objective_lower_bound = 0.0,
+        # SDDP.jl kwargs ...
+        print_level = 0,
+        iteration_limit = 50,
+    )
+    open("bounds.dat", "w") do io
+        for (w, b) in zip(weights, bounds)
+            println(io, "$(w)  $(b)")
+        end
+    end
+    simulation_weights = [0.1, 0.7, 0.9]
+    simulations = _simulate_policy(model, simulation_weights);
+    _save_simulations_to_dat(simulations, simulation_weights)
+    return
+end
+
+"""
+    experiment_2(N::Int)
+
+Run an experiment in which we time how long it takes to solve N different
+policies using the saddle cuts.
+"""
+function experiment_2(N::Int)
+    # Precompilation to avoid measuring that overhead!
+    _model = create_model()
+    SDDP.train_biobjective(_model; solution_limit = 1, iteration_limit = 1)
+    # Now the real model
+    model = create_model()
+    solutions = SDDP.train_biobjective(
+        model;
+        solution_limit = N,
+        print_level = 0,
+        stopping_rules = [SDDP.BoundStalling(10, 1e3)],
+    )
+    open("experiment_2.dat", "w") do io
+        for (weight, (bound, time)) in solutions
+            println(io, weight, ", ", bound, ", ", time)
+        end
+    end
+    return
+end
+
+"""
+    experiment_2(N)
+
+Run an experiment in which we time how long it takes to solve N different
+policies by solving N instances of SDDP
+"""
+function experiment_3(N)
+    # Precompilation to avoid measuring that overhead!
+    _model = create_model(1.0)
+    SDDP.train(_model; iteration_limit = 1, print_level = 0)
+    # Now the real model
+    start_time = time()
+    for weight in range(0, 1, length = N)
+        model = create_model(weight)
+        SDDP.train(
+            model;
+            print_level = 0,
+            stopping_rules = [SDDP.BoundStalling(10, 1e3)],
+        )
+        bound = SDDP.calculate_bound(model)
+        open("experiment_3.dat", "a") do io
+            println(io, weight, ", ", bound, ", ", time() - start_time)
+        end
+    end
+    return
+end
+
+function help()
+    println("""julia brazilian_example.jl --experiment={1,2,3} [-n N]
+
+    ## Arguments
+
+     * --experiment :: chose which experiment to Run
+     * --N :: Choose how many weights to run for experiments 2 and 3
+
+    ## Examples
+
+    ```
+    julia --project=. brazilian_example.jl --experiment=1
+    julia --project=. brazilian_example.jl --experiment=2 -n 5
+    julia --project=. brazilian_example.jl --experiment=3 -n 5
+    ```
+    """)
+end
+
+if findfirst(isequal("--experiment=1"), ARGS) !== nothing
+    experiment_1()
+elseif findfirst(isequal("--experiment=2"), ARGS) !== nothing
+    i = findfirst(isequal("-n"), ARGS)
+    experiment_2(parse(Int, ARGS[i+1]))
+elseif findfirst(isequal("--experiment=3"), ARGS) !== nothing
+    i = findfirst(isequal("-n"), ARGS)
+    experiment_3(parse(Int, ARGS[i+1]))
+else
+    help()
 end

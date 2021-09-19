@@ -92,11 +92,12 @@ function train_biobjective(
     solution_limit::Int,
     kwargs...,
 )
-    solutions = Dict{Float64,Float64}()
+    start_time = time()
+    solutions = Dict{Float64,Tuple{Float64,Float64}}()
     for weight in (0.0, 1.0)
         set_trade_off_weight(model, weight)
         SDDP.train(model; add_to_existing_cuts = true, kwargs...)
-        solutions[weight] = SDDP.calculate_bound(model)
+        solutions[weight] = (SDDP.calculate_bound(model), time() - start_time)
     end
     queue = Tuple{Float64,Float64}[(0.0, 1.0)]
     while length(queue) > 0 && length(solutions) < solution_limit
@@ -105,10 +106,11 @@ function train_biobjective(
         set_trade_off_weight(model, w)
         SDDP.train(model; add_to_existing_cuts = true, kwargs...)
         bound = SDDP.calculate_bound(model)
-        if !isapprox(0.5 * (solutions[a] + solutions[b]), bound; rtol = 1e-4)
+        solutions[w] = (bound, time() - start_time)
+        best_bound = 0.5 * (solutions[a][1] + solutions[b][1])
+        if !isapprox(best_bound, bound; rtol = 1e-4)
             push!(queue, (a, w))
             push!(queue, (w, b))
-            solutions[w] = bound
         end
     end
     return solutions
